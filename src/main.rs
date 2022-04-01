@@ -27,6 +27,8 @@ const ENEMY_SPRITE: &str = "enemy_a_01.png";
 const PLAYER_LASER_SPRITE: &str = "laser_a_01.png";
 const ENEMY_LASER_SPRITE: &str = "laser_b_01.png";
 const EXPLOSION_SHEET: &str = "explo_a_sheet.png";
+const MAX_ENEMIES: u32 = 2;
+const MAX_FORMATION_MEMBERS: u32 = 2;
 const SCALE: f32 = 0.5;
 const PLAYER_RESPAWN_DELAY: f64 = 2.;
 
@@ -112,7 +114,8 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugin(PlayerPlugin)
         .add_plugin(EnemyPlugin)
-        .add_startup_system(setup)
+        .add_startup_system(setup.label("start"))
+        .add_startup_system(close_game.after("start"))
         .add_system(close_game)
         .add_system(player_laser_hit_enemy.system())
         .add_system(enemy_laser_hit_player.system())
@@ -153,6 +156,8 @@ fn setup(
 
 }
 
+fn render_background()
+
 fn close_game(
     keyboard_input: Res<Input<KeyCode>>,
     mut exit: EventWriter<AppExit>
@@ -161,6 +166,7 @@ fn close_game(
         exit.send(AppExit);
     }
 }
+
 
 fn load_image(images: &mut ResMut<Assets<Image>>, path: &str) -> (Handle<Image>, Vec2) {
     let path = Path::new(SPRITE_DIR).join(path);
