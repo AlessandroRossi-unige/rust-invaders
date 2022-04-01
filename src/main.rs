@@ -1,7 +1,12 @@
 #![allow(unused)]
 
 
+mod player;
+mod enemy;
+
+use bevy::math::Vec3Swizzles;
 use std::borrow::BorrowMut;
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::exit;
 use std::ptr::addr_of;
@@ -9,47 +14,49 @@ use bevy::app::AppExit;
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::render::texture::ImageType;
+use bevy::sprite::collide_aabb::collide;
 use bevy::window::CloseWindow;
+use crate::enemy::EnemyPlugin;
+use crate::player::PlayerPlugin;
 use crate::StartupStage::Startup;
 
 const SPRITE_DIR: &str = "assets";
 
 const PLAYER_SPRITE: &str = "player_a_01.png";
+const ENEMY_SPRITE: &str = "enemy_a_01.png";
 const LASER_SPRITE: &str = "laser_a_01.png";
+const EXPLOSION_SHEET: &str = "explo_a_sheet.png";
+const SCALE: f32 = 0.5;
 
 const TIME_STEP: f32 = 1. / 60.;
 
 pub struct SpriteInfos {
     player: (Handle<Image>, Vec2),
-    laser: (Handle<Image>, Vec2)
+    player_laser: (Handle<Image>, Vec2),
+    enemy: (Handle<Image>, Vec2),
+    explosion: Handle<TextureAtlas>,
 }
 
 struct WinSize {
     w: f32,
     h: f32,
 }
-
-
-pub struct PlayerPlugin;
-
-impl Plugin for PlayerPlugin {
-    fn build(&self, app: &mut App) {
-        app
-            .add_startup_stage(
-                "game_setup_actors",
-                SystemStage::single(player_spawn.system()),
-            )
-            .add_system(player_movement.system())
-            .add_system(player_fire.system())
-            .add_system(laser_movement.system());
-
-    }
-}
-
+#[derive(Component)]
+struct ActiveEnemies(u32);
+#[derive(Component)]
+struct Enemy;
 #[derive(Component)]
 struct Player;
 #[derive(Component)]
 struct Laser;
+#[derive(Component)]
+struct PlayerReadyFire(bool);
+#[derive(Component)]
+struct Explosion;
+#[derive(Component)]
+struct ExplosionToSpawn(Vec3);
+
+
 #[derive(Component)]
 struct Speed(f32);
 
@@ -71,10 +78,15 @@ fn main() {
             height: 676.0,
             ..Default::default()
         })
+        .insert_resource(ActiveEnemies(0))
         .add_plugins(DefaultPlugins)
         .add_plugin(PlayerPlugin)
+        .add_plugin(EnemyPlugin)
         .add_startup_system(setup)
         .add_system(close_game)
+        .add_system(player_laser_hit_enemy.system())
+        .add_system(explosion_to_spawn.system())
+        .add_system(animate_explosion.system())
         .run();
 }
 
@@ -96,11 +108,26 @@ fn setup(
 
     window.set_position(IVec2::new(1300, 80));
 
+    // create the main resources
+    let texture_handle = asset_server.load(EXPLOSION_SHEET);
+    let texture_atlas = TextureAtlas::from_grid(texture_handle, Vec2::new(64.0, 64.0), 4, 4);
+
     commands.insert_resource(SpriteInfos {
         player: load_image(&mut images, PLAYER_SPRITE),
-        laser: load_image(&mut images, LASER_SPRITE)
+        player_laser: load_image(&mut images, LASER_SPRITE),
+        enemy: load_image(&mut images, ENEMY_SPRITE),
+        explosion: texture_atlases.add(texture_atlas),
     });
 
+}
+
+fn close_game(
+    keyboard_input: Res<Input<KeyCode>>,
+    mut exit: EventWriter<AppExit>
+) {
+    if keyboard_input.pressed(KeyCode::Escape) {
+        exit.send(AppExit);
+    }
 }
 
 fn load_image(images: &mut ResMut<Assets<Image>>, path: &str) -> (Handle<Image>, Vec2) {
@@ -114,82 +141,94 @@ fn load_image(images: &mut ResMut<Assets<Image>>, path: &str) -> (Handle<Image>,
 }
 
 
-fn player_spawn(mut commands: Commands, asset_server: Res<AssetServer>, win_size: Res<WinSize>) {
-    let bottom = win_size.h / 2.;
-
-    let image = asset_server.load(PLAYER_SPRITE);
-    commands.spawn_bundle(SpriteBundle {
-        texture: image,
-        transform: Transform {
-            translation: Vec3::new(0., -bottom + 25., 10.),
-            scale: Vec3::new(0.5, 0.5, 0.1),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-        .insert(Player)
-        .insert(Speed::default());
-}
-
-fn player_movement(
-    keyboard_input: Res<Input<KeyCode>>,
-    mut query: Query<(&Speed, &mut Transform), With<Player>>,
-    win_size: Res<WinSize>
-) {
-    let left_boundary = -win_size.w / 2.;
-    let right_boundary = win_size.w / 2.;
-    if let Ok((speed, mut transform)) = query.get_single_mut() {
-        let direction = if keyboard_input.pressed(KeyCode::A) { -1.}
-        else if keyboard_input.pressed(KeyCode::D)  { 1.}
-        else { 0.};
-        transform.translation.x += direction * speed.0 * TIME_STEP;
-    }
-}
-
-fn close_game(
-    keyboard_input: Res<Input<KeyCode>>,
-    mut exit: EventWriter<AppExit>
-) {
-    if keyboard_input.pressed(KeyCode::Escape) {
-        exit.send(AppExit);
-    }
-}
-
-fn player_fire(
+fn player_laser_hit_enemy(
     mut commands: Commands,
-    kb: Res<Input<KeyCode>>,
-    asset_server: Res<AssetServer>,
-    mut query: Query<&Transform , With<Player>>
-){
-    if let Ok(player_tf) = query.get_single_mut() {
-        if kb.pressed(KeyCode::Space) {
-            let coords = (player_tf.translation.x, player_tf.translation.y);
-            let image = asset_server.load(LASER_SPRITE);
-            commands.spawn_bundle(SpriteBundle {
-                texture: image,
-                transform: Transform {
-                    translation: Vec3::new(coords.0, coords.1, 0.),
-                    scale: Vec3::new(0.5, 0.5, 0.1),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-                .insert(Laser)
-                .insert(Speed::default());
+    sprite_infos: Res<SpriteInfos>,
+    mut laser_query: Query<(Entity, &Transform), With<Laser>>,
+    mut enemy_query: Query<(Entity, &Transform), With<Enemy>>,
+    mut active_enemies: ResMut<ActiveEnemies>,
+) {
+
+    let mut enemies_blasted: HashSet<Entity> = HashSet::new();
+
+    for (player_laser_entity, player_laser_tf) in laser_query.iter_mut() {
+        let player_laser_size = sprite_infos.player_laser.1;
+        let player_laser_scale = Vec2::from(player_laser_tf.scale.abs().xy());
+        for (enemy_entity, enemy_tf) in enemy_query.iter_mut() {
+
+            let enemy_size = sprite_infos.enemy.1;
+            let enemy_scale = Vec2::from(enemy_tf.scale.xy());
+
+            let collision = collide(
+                player_laser_tf.translation,
+                player_laser_size * player_laser_scale,
+                enemy_tf.translation,
+                enemy_size * enemy_scale,
+            );
+
+            if let Some(_) = collision {
+                if enemies_blasted.get(&enemy_entity).is_none() {
+                    // remove the enemy
+                    commands.entity(enemy_entity).despawn();
+                    active_enemies.0 -= 1;
+
+                    commands
+                        .spawn()
+                        .insert(ExplosionToSpawn(enemy_tf.translation.clone()));
+
+                    enemies_blasted.insert(enemy_entity);
+                }
+                // remove the laser
+                commands.entity(player_laser_entity).despawn();
+            }
         }
     }
 }
 
-fn laser_movement(
+fn explosion_to_spawn(
     mut commands: Commands,
-    win_size: Res<WinSize>,
-    mut query: Query<(Entity, &Speed, &mut Transform), With<Laser>>
+    query: Query<(Entity, &ExplosionToSpawn)>,
+    materials: Res<SpriteInfos>,
 ) {
-    for (laser_entity, speed, mut laser_tf) in query.iter_mut() {
-        let translation = &mut laser_tf.translation;
-        translation.y += speed.0 * TIME_STEP;
-        // if translation.y > win_size.h {
-        //     commands.entity(laser_entity).despawn();
-        // }
+    for (explosion_spawn_entity, explosion_to_spawn) in query.iter() {
+        commands
+            .spawn_bundle(SpriteSheetBundle {
+                texture_atlas: materials.explosion.clone(),
+                transform: Transform {
+                    translation: explosion_to_spawn.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .insert(Explosion)
+            .insert(Timer::from_seconds(0.05, true));
+
+        commands.entity(explosion_spawn_entity).despawn();
+    }
+}
+
+fn animate_explosion(
+    mut commands: Commands,
+    time: Res<Time>,
+    texture_atlases: Res<Assets<TextureAtlas>>,
+    mut query: Query<
+        (
+            Entity,
+            &mut Timer,
+            &mut TextureAtlasSprite,
+            &Handle<TextureAtlas>,
+        ),
+        With<Explosion>,
+    >,
+) {
+    for (entity, mut timer, mut sprite, texture_atlas_handle) in query.iter_mut() {
+        timer.tick(time.delta());
+        if timer.finished() {
+            let texture_atlas = texture_atlases.get(texture_atlas_handle).unwrap();
+            sprite.index += 1;
+            if sprite.index == texture_atlas.textures.len() {
+                commands.entity(entity).despawn();
+            }
+        }
     }
 }

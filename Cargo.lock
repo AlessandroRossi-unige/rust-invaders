@@ -785,6 +785,7 @@ name = "bullet_hell"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "rand",
 ]
 
 [[package]]
